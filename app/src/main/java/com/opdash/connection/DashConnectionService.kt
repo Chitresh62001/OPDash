@@ -101,7 +101,15 @@ class DashConnectionService : Service() {
 
         // Start as foreground immediately
         val notification = buildNotification("Connecting to $ssid...")
-        startForeground(NOTIFICATION_ID, notification)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            startForeground(
+                NOTIFICATION_ID,
+                notification,
+                android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE
+            )
+        } else {
+            startForeground(NOTIFICATION_ID, notification)
+        }
 
         // Acquire a partial wake lock to keep CPU alive for UDP heartbeat
         val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
