@@ -293,9 +293,11 @@ class DashConnectionService : Service() {
 
     private fun sendPacket(packetData: ByteArray) {
         try {
-            // Inject sequence counter at byte 16
+            // Inject sequence counter at byte 16 (only if packet is long enough)
             val data = packetData.copyOf()
-            data[16] = (sequenceCounter and 0xFF).toByte()
+            if (data.size > 16) {
+                data[16] = (sequenceCounter and 0xFF).toByte()
+            }
             sequenceCounter = (sequenceCounter + 1) % 256
 
             val broadcastAddress = InetAddress.getByName(DASH_BROADCAST_IP)
@@ -446,9 +448,12 @@ class DashConnectionService : Service() {
     }
 
     private fun buildNotification(text: String): Notification {
+        val launchIntent = packageManager.getLaunchIntentForPackage(packageName)
+            ?: Intent(this, Class.forName("com.opdash.MainActivity"))
+
         val pendingIntent = PendingIntent.getActivity(
             this, 0,
-            packageManager.getLaunchIntentForPackage(packageName),
+            launchIntent,
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
 
