@@ -99,16 +99,24 @@ class DashConnectionService : Service() {
             return START_NOT_STICKY
         }
 
-        // Start as foreground immediately
-        val notification = buildNotification("Connecting to $ssid...")
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            startForeground(
-                NOTIFICATION_ID,
-                notification,
-                android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE
-            )
-        } else {
-            startForeground(NOTIFICATION_ID, notification)
+        try {
+            // Start as foreground immediately
+            val notification = buildNotification("Connecting to $ssid...")
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                startForeground(
+                    NOTIFICATION_ID,
+                    notification,
+                    android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE
+                )
+            } else {
+                startForeground(NOTIFICATION_ID, notification)
+            }
+        } catch (e: Exception) {
+            Logger.d("Failed to start foreground service: ${e.message}")
+            connectionState = ConnectionState.ERROR
+            statusMessage = "Missing Permissions"
+            stopSelf()
+            return START_NOT_STICKY
         }
 
         // Acquire a partial wake lock to keep CPU alive for UDP heartbeat
