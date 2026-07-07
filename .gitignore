@@ -13,3 +13,9 @@
 .externalNativeBuild
 .cxx
 local.properties
+./apk_output
+./apk_output/
+/apk_output/
+/markdown-preview.pdf
+/tripper_dash_communication_notes.txt
+/tripper_dash_communication_notes (2).txt
