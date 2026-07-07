@@ -69,6 +69,10 @@ class MainViewModel(
             Logger.d("Enter WiFi Password")
             return
         }
+        if (password.length < 8 || password.length > 63) {
+            Logger.d("WiFi Password must be between 8 and 63 characters.")
+            return
+        }
 
         manager.connect(
             dashboardSSID,

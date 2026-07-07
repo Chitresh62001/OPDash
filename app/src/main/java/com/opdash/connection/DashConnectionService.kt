@@ -133,44 +133,58 @@ class DashConnectionService : Service() {
         connectionState = ConnectionState.CONNECTING_WIFI
         statusMessage = "Connecting to $ssid..."
 
-        val specifier = WifiNetworkSpecifier.Builder()
-            .setSsid(ssid)
-            .setWpa2Passphrase(password)
-            .build()
-
-        val request = NetworkRequest.Builder()
-            .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
-            .setNetworkSpecifier(specifier)
-            .build()
-
-        networkCallback = object : ConnectivityManager.NetworkCallback() {
-            override fun onAvailable(network: Network) {
-                Logger.d("Wi-Fi network available. Binding process.")
-                boundNetwork = network
-                connectivityManager.bindProcessToNetwork(network)
-                connectionState = ConnectionState.CONNECTED_WIFI
-                statusMessage = "Wi-Fi connected. Starting UDP..."
-
-                updateNotification("Connected to $ssid. Streaming...")
-                startUdpCommunication(network)
+        try {
+            // WPA2/WPA3 passphrases must be between 8 and 63 characters.
+            if (password.length < 8 || password.length > 63) {
+                throw IllegalArgumentException("Passphrase must be between 8 and 63 characters.")
             }
 
-            override fun onUnavailable() {
-                Logger.d("Wi-Fi network unavailable.")
-                connectionState = ConnectionState.ERROR
-                statusMessage = "Wi-Fi unavailable"
-                stopSelf()
+            val specifier = WifiNetworkSpecifier.Builder()
+                .setSsid(ssid)
+                .setWpa2Passphrase(password)
+                .build()
+
+            val request = NetworkRequest.Builder()
+                .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
+                .setNetworkSpecifier(specifier)
+                .build()
+
+            val handler = android.os.Handler(android.os.Looper.getMainLooper())
+
+            networkCallback = object : ConnectivityManager.NetworkCallback() {
+                override fun onAvailable(network: Network) {
+                    Logger.d("Wi-Fi network available. Binding process.")
+                    boundNetwork = network
+                    connectivityManager.bindProcessToNetwork(network)
+                    connectionState = ConnectionState.CONNECTED_WIFI
+                    statusMessage = "Wi-Fi connected. Starting UDP..."
+
+                    updateNotification("Connected to $ssid. Streaming...")
+                    startUdpCommunication(network)
+                }
+
+                override fun onUnavailable() {
+                    Logger.d("Wi-Fi network unavailable.")
+                    connectionState = ConnectionState.ERROR
+                    statusMessage = "Wi-Fi unavailable"
+                    handler.post { stopSelf() }
+                }
+
+                override fun onLost(network: Network) {
+                    Logger.d("Wi-Fi network lost.")
+                    connectionState = ConnectionState.ERROR
+                    statusMessage = "Wi-Fi connection lost"
+                    handler.post { stopSelf() }
+                }
             }
 
-            override fun onLost(network: Network) {
-                Logger.d("Wi-Fi network lost.")
-                connectionState = ConnectionState.ERROR
-                statusMessage = "Wi-Fi connection lost"
-                stopSelf()
-            }
+            connectivityManager.requestNetwork(request, networkCallback!!)
+        } catch (e: Exception) {
+            Logger.d("Wi-Fi setup failed: ${e.message}")
+            connectionState = ConnectionState.ERROR
+            statusMessage = "Connection failed: ${e.message}"
+            stopSelf()
         }
-
-        connectivityManager.requestNetwork(request, networkCallback!!)
     }
 
     // ──────────────────────── UDP Communication ────────────────────────

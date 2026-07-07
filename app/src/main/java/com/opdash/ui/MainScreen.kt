@@ -240,7 +240,7 @@ fun ConnectionCard(vm: MainViewModel) {
             Button(
                 onClick = { vm.connect() },
                 modifier = Modifier.weight(1f),
-                enabled = ssid.isNotBlank() && password.isNotBlank() && !vm.isServiceRunning,
+                enabled = ssid.isNotBlank() && password.length >= 8 && !vm.isServiceRunning,
                 colors = ButtonDefaults.buttonColors(
                     containerColor = AccentOrange,
                     contentColor = Color.Black,
