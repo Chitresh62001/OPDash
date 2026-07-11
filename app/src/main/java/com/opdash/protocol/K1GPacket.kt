@@ -32,7 +32,7 @@ object K1GPacketBuilder {
      */
     fun buildPacket(elementCount: Int, payload: ByteArray): ByteArray {
         val header = ByteArray(17)
-        val totalLength = header.size + payload.size
+        val totalLength = header.size + payload.size + 2 // Header + Payload + 2 bytes CRC
 
         // Bytes 0-1: Total length of entire packet (big-endian)
         header[0] = (totalLength shr 8).toByte()
@@ -48,24 +48,28 @@ object K1GPacketBuilder {
         header[6] = 0x00
         header[7] = 0x00
 
-        // Bytes 8-9: Constant 02 01
+        // Bytes 8-9: Constant 02 01 (Some firmwares use 01 01)
         header[8] = 0x02
         header[9] = 0x01
 
-        // Bytes 10-11: Length of identifier "K1G " (0x0005)
+        // Bytes 10-11: Length of identifier "K1G " (0x0004)
         header[10] = 0x00
-        header[11] = 0x05
+        header[11] = 0x04
 
         // Bytes 12-15: ASCII bytes of "K1G " (4B 31 47 20)
         header[12] = 0x4B.toByte()
         header[13] = 0x31.toByte()
         header[14] = 0x47.toByte()
         header[15] = 0x20.toByte()
+        
+        // OR Try without the space if "K1G " fails: 4B 31 47 00 and Length 4
+        // Original RE app usually sends "K1G " with a trailing space.
 
         // Byte 16: Sequence counter placeholder (to be replaced at send-time)
         header[16] = 0x00
 
-        return header + payload
+        // Return header + payload + 2 bytes placeholder for CRC
+        return header + payload + byteArrayOf(0x00, 0x00)
     }
 
     /**
@@ -110,10 +114,15 @@ object K1GPacketBuilder {
      * Active payload: "0517000155" (music playing) or "05170001AA" (music paused/stopped).
      * Element count is hardcoded to 2 in RE app.
      */
+    /**
+     * Prepares the music active / inactive packet.
+     * Active payload: "0517000155" (music playing) or "05170001AA" (music paused/stopped).
+     * Element count is hardcoded to 1.
+     */
     fun buildMusicActivePacket(isActive: Boolean): ByteArray {
         val value = byteArrayOf(if (isActive) 0x55.toByte() else 0xAA.toByte())
         val tlv = buildTlv(0x0517, value)
-        return buildPacket(2, tlv)
+        return buildPacket(1, tlv)
     }
 
     /**
@@ -123,7 +132,7 @@ object K1GPacketBuilder {
     fun buildMusicPlayStatePacket(isPlaying: Boolean): ByteArray {
         val value = byteArrayOf(if (isPlaying) 0x55.toByte() else 0xAA.toByte())
         val tlv = buildTlv(0x0519, value)
-        return buildPacket(2, tlv)
+        return buildPacket(1, tlv)
     }
 
     /**
@@ -132,9 +141,9 @@ object K1GPacketBuilder {
      * Truncated at 19 bytes per string.
      */
     fun buildMusicMetadataPacket(title: String, artist: String, album: String): ByteArray {
-        val cleanTitle = if (title.length > 19) title.substring(0, 19) else title
-        val cleanArtist = if (artist.length > 19) artist.substring(0, 19) else artist
-        val cleanAlbum = if (album.length > 19) album.substring(0, 19) else album
+        val cleanTitle = if (title.length > 20) title.substring(0, 20) else title
+        val cleanArtist = if (artist.length > 20) artist.substring(0, 20) else artist
+        val cleanAlbum = if (album.length > 20) album.substring(0, 20) else album
 
         val titleBytes = cleanTitle.toByteArray(StandardCharsets.US_ASCII)
         val artistBytes = cleanArtist.toByteArray(StandardCharsets.US_ASCII)
@@ -152,7 +161,7 @@ object K1GPacketBuilder {
         System.arraycopy(artistBytes, 0, value, pos, artistBytes.size)
 
         val tlv = buildTlv(0x050D, value)
-        return buildPacket(2, tlv)
+        return buildPacket(1, tlv)
     }
 
     /**
@@ -242,5 +251,33 @@ object K1GPacketBuilder {
         elementCount++
 
         return buildPacket(elementCount, payload)
+    }
+
+    /**
+     * Builds an Image Fragment packet (Category 0x08).
+     * @param fragmentIndex Index of this fragment (starting at 0).
+     * @param totalFragments Total number of fragments for this image.
+     * @param data The JPEG data chunk.
+     */
+    fun buildImagePacket(fragmentIndex: Int, totalFragments: Int, data: ByteArray): ByteArray {
+        val infoValue = ByteArray(4)
+        infoValue[0] = (totalFragments shr 8).toByte()
+        infoValue[1] = (totalFragments and 0xFF).toByte()
+        infoValue[2] = (fragmentIndex shr 8).toByte()
+        infoValue[3] = (fragmentIndex and 0xFF).toByte()
+        
+        val infoTlv = buildTlv(0x0801, infoValue)
+        val dataTlv = buildTlv(0x0802, data)
+        
+        return buildPacket(2, infoTlv + dataTlv)
+    }
+
+    /**
+     * Builds a Handshake / Keep-alive packet (often needed to wake up Dash).
+     * Category 0x00, Tag 0x000B (FOTA signal often used as handshake).
+     */
+    fun buildHandshakePacket(): ByteArray {
+        val tlv = buildTlv(0x000B, byteArrayOf(0x00))
+        return buildPacket(1, tlv)
     }
 }

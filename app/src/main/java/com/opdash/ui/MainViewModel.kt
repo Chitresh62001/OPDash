@@ -1,5 +1,6 @@
 package com.opdash.ui
 
+import android.annotation.SuppressLint
 import android.app.Application
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -16,12 +17,28 @@ class MainViewModel(
 ) : AndroidViewModel(application) {
 
     private val manager = ConnectionManager(application)
+    private val bleManager = com.opdash.ble.BleConnectionManager(application)
+    private val prefs = application.getSharedPreferences("dash_prefs", android.content.Context.MODE_PRIVATE)
 
-    var dashboardSSID by mutableStateOf("")
+    var dashboardSSID by mutableStateOf(prefs.getString("dash_ssid", "") ?: "")
         private set
 
-    var password by mutableStateOf("")
+    var password by mutableStateOf(prefs.getString("dash_pass", "") ?: "")
         private set
+
+    var isScanning by mutableStateOf(false)
+        private set
+
+    @SuppressLint("MissingPermission")
+    fun startBleScan() {
+        isScanning = true
+        bleManager.startScan { device ->
+            val deviceName = device.name ?: "Unknown"
+            Logger.d("Dash found: $deviceName")
+            updateDashboardSSID(deviceName)
+            isScanning = false
+        }
+    }
 
     // Derived from the service companion state
     val state: ConnectionState
@@ -51,13 +68,18 @@ class MainViewModel(
 
     val isMusicPlaying: Boolean
         get() = DashConnectionService.isMusicPlaying
+        
+    val isMapCasting: Boolean
+        get() = DashConnectionService.isMapCasting
 
     fun updatePassword(value: String) {
         password = value
+        prefs.edit().putString("dash_pass", value).apply()
     }
 
     fun updateDashboardSSID(value: String) {
         dashboardSSID = value
+        prefs.edit().putString("dash_ssid", value).apply()
     }
 
     fun connect() {
@@ -106,6 +128,11 @@ class MainViewModel(
             DashConnectionService.currentTrackAlbum = "Machine Head"
         }
         Logger.d("SIM: Music ${if (DashConnectionService.isMusicPlaying) "Playing" else "Paused"}")
+    }
+    
+    fun toggleMapCasting() {
+        DashConnectionService.isMapCasting = !DashConnectionService.isMapCasting
+        Logger.d("Map Casting: ${if (DashConnectionService.isMapCasting) "ENABLED" else "DISABLED"}")
     }
 
     fun clearLogs() {

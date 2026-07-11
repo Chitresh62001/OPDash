@@ -4,7 +4,9 @@ import android.app.*
 import android.content.Context
 import android.content.Intent
 import android.net.*
+import android.net.wifi.WifiManager
 import android.net.wifi.WifiNetworkSpecifier
+import android.net.wifi.WifiNetworkSuggestion
 import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
@@ -13,9 +15,13 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import com.opdash.logging.Logger
 import com.opdash.model.ConnectionState
 import com.opdash.protocol.K1GPacketBuilder
+import kotlinx.coroutines.*
+import kotlinx.coroutines.flow.launchIn
+import kotlinx.coroutines.flow.onEach
 import java.net.DatagramPacket
 import java.net.DatagramSocket
 import java.net.InetAddress
@@ -36,6 +42,7 @@ class DashConnectionService : Service() {
     companion object {
         private const val CHANNEL_ID = "opdash_service_channel"
         private const val NOTIFICATION_ID = 1001
+        private const val DASH_IP = "192.168.4.1"
         private const val DASH_BROADCAST_IP = "192.168.4.255"
         private const val SEND_PORT = 2000
         private const val RECV_PORT = 2002
@@ -62,12 +69,23 @@ class DashConnectionService : Service() {
         var currentTrackAlbum by mutableStateOf("")
         var isMusicPlaying by mutableStateOf(false)
 
+        // Navigation data
+        var currentRoadName by mutableStateOf("")
+        var distanceToTurn by mutableIntStateOf(0)
+        var turnIcon by mutableIntStateOf(0)
+        
+        // Casting control
+        var isMapCasting by mutableStateOf(false)
+
         fun isRunning(): Boolean =
-            connectionState == ConnectionState.CONNECTED ||
-            connectionState == ConnectionState.CONNECTING_WIFI ||
-            connectionState == ConnectionState.CONNECTED_WIFI ||
-            connectionState == ConnectionState.STARTING_UDP
+            connectionState != ConnectionState.IDLE && connectionState != ConnectionState.ERROR
     }
+    
+    private val mapCaster = com.opdash.media.MapCastingManager { packet ->
+        sendPacket(packet)
+    }
+    
+    private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
 
     private val connectivityManager by lazy {
         getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
@@ -81,20 +99,35 @@ class DashConnectionService : Service() {
     private var receiverThread: Thread? = null
     private var sequenceCounter: Int = 0
     private var wakeLock: PowerManager.WakeLock? = null
+    private var wifiLock: WifiManager.WifiLock? = null
+    private var multicastLock: WifiManager.MulticastLock? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onCreate() {
         super.onCreate()
         createNotificationChannel()
+        
+        // Observe map casting toggle
+        snapshotFlow { isMapCasting }
+            .onEach { casting ->
+                if (casting) {
+                    Logger.d("Service: Starting Map Casting...")
+                    mapCaster.startCasting()
+                } else {
+                    Logger.d("Service: Stopping Map Casting...")
+                    mapCaster.stopCasting()
+                }
+            }
+            .launchIn(serviceScope)
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val ssid = intent?.getStringExtra(EXTRA_SSID) ?: ""
         val password = intent?.getStringExtra(EXTRA_PASSWORD) ?: ""
 
-        if (ssid.isBlank() || password.isBlank()) {
-            Logger.d("Service started without SSID/Password. Stopping.")
+        if (ssid.isBlank()) {
+            Logger.d("Service started without SSID. Stopping.")
             stopSelf()
             return START_NOT_STICKY
         }
@@ -114,19 +147,26 @@ class DashConnectionService : Service() {
         } catch (e: Exception) {
             Logger.d("Failed to start foreground service: ${e.message}")
             connectionState = ConnectionState.ERROR
-            statusMessage = "Missing Permissions"
+            statusMessage = "Foreground Error"
             stopSelf()
             return START_NOT_STICKY
         }
 
-        // Acquire a partial wake lock to keep CPU alive for UDP heartbeat
+        // Keep CPU, Wi-Fi and Multicast alive
         val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
-        wakeLock = pm.newWakeLock(
-            PowerManager.PARTIAL_WAKE_LOCK,
-            "OPDash::DashHeartbeat"
-        ).apply { acquire(10 * 60 * 1000L) } // 10 min max, renewed per heartbeat cycle
+        wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "OPDash::WakeLock").apply {
+            acquire(30 * 60 * 1000L) 
+        }
 
-        Logger.d("Service started. Connecting to SSID: $ssid")
+        val wm = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
+        wifiLock = wm.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "OPDash::WifiLock").apply {
+            acquire()
+        }
+        multicastLock = wm.createMulticastLock("OPDash::MulticastLock").apply {
+            acquire()
+        }
+
+        Logger.d("Service started. Target SSID: $ssid")
         connectToWifi(ssid, password)
 
         return START_STICKY
@@ -135,9 +175,10 @@ class DashConnectionService : Service() {
     override fun onDestroy() {
         super.onDestroy()
         disconnect()
-        wakeLock?.let {
-            if (it.isHeld) it.release()
-        }
+        serviceScope.cancel()
+        wakeLock?.let { if (it.isHeld) it.release() }
+        wifiLock?.let { if (it.isHeld) it.release() }
+        multicastLock?.let { if (it.isHeld) it.release() }
         connectionState = ConnectionState.IDLE
         statusMessage = "Service stopped"
         Logger.d("Service destroyed.")
@@ -150,56 +191,95 @@ class DashConnectionService : Service() {
         statusMessage = "Connecting to $ssid..."
 
         try {
-            // WPA2/WPA3 passphrases must be between 8 and 63 characters.
-            if (password.length < 8 || password.length > 63) {
-                throw IllegalArgumentException("Passphrase must be between 8 and 63 characters.")
+            // First, try to see if we are already connected to a Wi-Fi network
+            val currentNetwork = connectivityManager.activeNetwork
+            val currentCaps = connectivityManager.getNetworkCapabilities(currentNetwork)
+            if (currentCaps?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true) {
+                 Logger.d("Device already on Wi-Fi. Attempting to bind UDP...")
+                 connectionState = ConnectionState.CONNECTED_WIFI
+                 startUdpCommunication(currentNetwork!!)
+                 // We still continue to requestNetwork to ensure we "own" the connection 
+                 // and stay on it even if there's no internet.
             }
 
-            val specifier = WifiNetworkSpecifier.Builder()
+            val builder = WifiNetworkSpecifier.Builder()
                 .setSsid(ssid)
-                .setWpa2Passphrase(password)
-                .build()
+            
+            if (password.isNotEmpty()) {
+                builder.setWpa2Passphrase(password)
+            }
+
+            val specifier = builder.build()
 
             val request = NetworkRequest.Builder()
                 .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
+                .removeCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
                 .setNetworkSpecifier(specifier)
                 .build()
 
-            val handler = android.os.Handler(android.os.Looper.getMainLooper())
+            statusMessage = "Please tap 'Connect' on the system popup"
+            Logger.d("Requesting Wi-Fi: $ssid")
 
             networkCallback = object : ConnectivityManager.NetworkCallback() {
                 override fun onAvailable(network: Network) {
-                    Logger.d("Wi-Fi network available. Binding process.")
+                    Logger.d("Wi-Fi bound successfully.")
                     boundNetwork = network
                     connectivityManager.bindProcessToNetwork(network)
+                    
                     connectionState = ConnectionState.CONNECTED_WIFI
-                    statusMessage = "Wi-Fi connected. Starting UDP..."
-
-                    updateNotification("Connected to $ssid. Streaming...")
+                    statusMessage = "Wi-Fi Ready"
+                    updateNotification("Connected to Dash")
+                    
                     startUdpCommunication(network)
                 }
 
-                override fun onUnavailable() {
-                    Logger.d("Wi-Fi network unavailable.")
-                    connectionState = ConnectionState.ERROR
-                    statusMessage = "Wi-Fi unavailable"
-                    handler.post { stopSelf() }
+                override fun onLost(network: Network) {
+                    Logger.d("Wi-Fi connection lost.")
+                    if (boundNetwork == network) {
+                        connectionState = ConnectionState.ERROR
+                        statusMessage = "Connection Lost"
+                        // Don't stopSelf() immediately, maybe it's a glitch
+                    }
                 }
 
-                override fun onLost(network: Network) {
-                    Logger.d("Wi-Fi network lost.")
-                    connectionState = ConnectionState.ERROR
-                    statusMessage = "Wi-Fi connection lost"
-                    handler.post { stopSelf() }
+                override fun onUnavailable() {
+                    Logger.d("Network request timed out or cancelled.")
+                    connectionState = ConnectionState.IDLE
+                    statusMessage = "Connection Cancelled"
+                    stopSelf()
                 }
             }
 
             connectivityManager.requestNetwork(request, networkCallback!!)
+            
+            // "Better than original": Suggest the network to the system for future auto-connect
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                suggestNetwork(ssid, password)
+            }
+
         } catch (e: Exception) {
-            Logger.d("Wi-Fi setup failed: ${e.message}")
+            Logger.d("Wi-Fi Error: ${e.message}")
             connectionState = ConnectionState.ERROR
-            statusMessage = "Connection failed: ${e.message}"
+            statusMessage = "Setup Failed"
             stopSelf()
+        }
+    }
+
+    @RequiresApi(Build.VERSION_CODES.Q)
+    private fun suggestNetwork(ssid: String, password: String) {
+        val suggestionBuilder = WifiNetworkSuggestion.Builder()
+            .setSsid(ssid)
+            .setIsAppInteractionRequired(false) // Try to connect automatically
+        
+        if (password.isNotEmpty()) {
+            suggestionBuilder.setWpa2Passphrase(password)
+        }
+
+        val suggestions = listOf(suggestionBuilder.build())
+        val wifiManager = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
+        val status = wifiManager.addNetworkSuggestions(suggestions)
+        if (status == WifiManager.STATUS_NETWORK_SUGGESTIONS_SUCCESS) {
+            Logger.d("Network suggestion added for $ssid (Auto-connect enabled)")
         }
     }
 
@@ -207,34 +287,44 @@ class DashConnectionService : Service() {
 
     private fun startUdpCommunication(network: Network) {
         connectionState = ConnectionState.STARTING_UDP
-        statusMessage = "Initializing UDP sockets..."
-
+        statusMessage = "Initializing UDP..."
+        
         Thread {
             try {
-                // Create and bind send socket to port 2000
-                sendSocket = DatagramSocket(SEND_PORT).apply {
-                    soTimeout = 1000
-                    broadcast = true
-                }
+                // Send socket: bind to port 2000 locally as well
+                // This ensures source port is 2000, which some dashes require.
+                sendSocket = DatagramSocket(SEND_PORT)
+                sendSocket?.broadcast = true
                 network.bindSocket(sendSocket!!)
-                Logger.d("Send socket bound to port $SEND_PORT")
 
-                // Create and bind receive socket to port 2002
+                // Receive socket: bind to 2002 locally
                 recvSocket = DatagramSocket(RECV_PORT)
                 network.bindSocket(recvSocket!!)
-                Logger.d("Receive socket bound to port $RECV_PORT")
 
                 connectionState = ConnectionState.CONNECTED
-                statusMessage = "Connected & streaming"
-                Logger.d("UDP sockets ready. Starting heartbeat & receiver.")
+                statusMessage = "Connected & Syncing"
+                Logger.d("UDP sockets ready. Source port: 2000, Destination port: 2000")
 
                 startHeartbeat()
                 startReceiver()
 
             } catch (e: Exception) {
-                Logger.d("UDP init failed: ${e.message}")
-                connectionState = ConnectionState.ERROR
-                statusMessage = "UDP error: ${e.message}"
+                Logger.d("UDP start failed: ${e.message}")
+                // Fallback to random source port if 2000 is taken
+                try {
+                    sendSocket = DatagramSocket()
+                    sendSocket?.broadcast = true
+                    network.bindSocket(sendSocket!!)
+                    Logger.d("UDP TX fallback to random port: ${sendSocket?.localPort}")
+                    
+                    // Proceed if fallback worked
+                    connectionState = ConnectionState.CONNECTED
+                    startHeartbeat()
+                    startReceiver()
+                } catch (e2: Exception) {
+                    connectionState = ConnectionState.ERROR
+                    statusMessage = "UDP Error"
+                }
             }
         }.start()
     }
@@ -246,46 +336,64 @@ class DashConnectionService : Service() {
         heartbeatTimer = Timer("DashHeartbeat", true).apply {
             scheduleAtFixedRate(object : TimerTask() {
                 override fun run() {
-                    sendHeartbeat()
+                    sendAllUpdates()
                 }
             }, 0L, HEARTBEAT_INTERVAL_MS)
         }
     }
 
-    private fun sendHeartbeat() {
+    private fun sendAllUpdates() {
         try {
+            // 0. Handshake (Keep-alive)
+            sendPacket(K1GPacketBuilder.buildHandshakePacket())
+            
+            // Check Map Casting status and trigger caster
+            if (isMapCasting) {
+                // In a real scenario, we'd pass the actual Map View from UI
+                // For this implementation, the caster will run its internal thread
+            }
+
+            // 1. Periodic Telemetry
             val telemetryPacket = K1GPacketBuilder.buildTelemetryPacket(
                 cellSignalStrength = getCellSignal(),
                 batteryLevel = getBatteryLevel(),
                 isCharging = isCharging(),
                 isGpsActive = true,
                 volume = 5,
-                weatherTemp = 30
+                weatherTemp = 25
             )
-
             sendPacket(telemetryPacket)
 
-            // If music is playing, send metadata every heartbeat
+            // 2. Music Sync
             if (isMusicPlaying && currentTrackTitle.isNotEmpty()) {
-                val musicActivePacket = K1GPacketBuilder.buildMusicActivePacket(true)
-                sendPacket(musicActivePacket)
-
-                val metadataPacket = K1GPacketBuilder.buildMusicMetadataPacket(
+                sendPacket(K1GPacketBuilder.buildMusicActivePacket(true))
+                sendPacket(K1GPacketBuilder.buildMusicMetadataPacket(
                     title = currentTrackTitle,
                     artist = currentTrackArtist,
                     album = currentTrackAlbum
-                )
-                sendPacket(metadataPacket)
-
-                val playStatePacket = K1GPacketBuilder.buildMusicPlayStatePacket(true)
-                sendPacket(playStatePacket)
+                ))
+                sendPacket(K1GPacketBuilder.buildMusicPlayStatePacket(true))
             } else {
-                val musicInactivePacket = K1GPacketBuilder.buildMusicActivePacket(false)
-                sendPacket(musicInactivePacket)
+                sendPacket(K1GPacketBuilder.buildMusicActivePacket(false))
+            }
+
+            // 3. Navigation Sync
+            if (currentRoadName.isNotEmpty()) {
+                val navPacket = K1GPacketBuilder.buildNavigationPacket(
+                    roadName = currentRoadName,
+                    primaryManeuver = turnIcon,
+                    distanceToTurn = distanceToTurn,
+                    distanceUnit = 1, // Meters
+                    etaHours = 0,
+                    etaMinutes = 15,
+                    totalDistanceRemaining = 5,
+                    totalDistanceUnit = 2 // KM
+                )
+                sendPacket(navPacket)
             }
 
         } catch (e: Exception) {
-            Logger.d("Heartbeat error: ${e.message}")
+            Logger.d("Send error: ${e.message}")
         }
     }
 
@@ -293,22 +401,30 @@ class DashConnectionService : Service() {
 
     private fun sendPacket(packetData: ByteArray) {
         try {
-            // Inject sequence counter at byte 16 (only if packet is long enough)
             val data = packetData.copyOf()
             if (data.size > 16) {
                 data[16] = (sequenceCounter and 0xFF).toByte()
             }
+            
+            // Calculate CRC16-CCITT (False) over all bytes except the last two (the CRC itself)
+            if (data.size > 2) {
+                val crc = com.opdash.ble.CRC16.calculate(data.copyOfRange(0, data.size - 2))
+                data[data.size - 2] = crc[0]
+                data[data.size - 1] = crc[1]
+            }
+
             sequenceCounter = (sequenceCounter + 1) % 256
 
-            val broadcastAddress = InetAddress.getByName(DASH_BROADCAST_IP)
-            val dgPacket = DatagramPacket(data, data.size, broadcastAddress, SEND_PORT)
-            sendSocket?.send(dgPacket)
+            // Send to both specific IP and broadcast to ensure delivery
+            val dgPacket1 = DatagramPacket(data, data.size, InetAddress.getByName(DASH_IP), SEND_PORT)
+            sendSocket?.send(dgPacket1)
+            
+            val dgPacket2 = DatagramPacket(data, data.size, InetAddress.getByName(DASH_BROADCAST_IP), SEND_PORT)
+            sendSocket?.send(dgPacket2)
+            
             packetsSent++
         } catch (e: Exception) {
-            // Don't spam the log on every packet failure
-            if (packetsSent % 30 == 0) {
-                Logger.d("Send error (seq=$sequenceCounter): ${e.message}")
-            }
+            if (packetsSent % 50 == 0) Logger.d("UDP TX Error: ${e.message}")
         }
     }
 

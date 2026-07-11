@@ -18,6 +18,10 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.LocationOn
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -185,26 +189,52 @@ fun ConnectionCard(vm: MainViewModel) {
         Spacer(modifier = Modifier.height(14.dp))
 
         // SSID Input
-        OutlinedTextField(
-            value = ssid,
-            onValueChange = {
-                ssid = it
-                vm.updateDashboardSSID(it)
-            },
-            modifier = Modifier.fillMaxWidth(),
-            label = { Text("Dashboard SSID", fontSize = 12.sp) },
-            singleLine = true,
-            colors = OutlinedTextFieldDefaults.colors(
-                focusedBorderColor = AccentOrange,
-                unfocusedBorderColor = TextDim,
-                cursorColor = AccentOrange,
-                focusedLabelColor = AccentOrange,
-                unfocusedLabelColor = TextDim,
-                focusedTextColor = TextPrimary,
-                unfocusedTextColor = TextPrimary
-            ),
-            shape = RoundedCornerShape(10.dp)
-        )
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            OutlinedTextField(
+                value = ssid,
+                onValueChange = {
+                    ssid = it
+                    vm.updateDashboardSSID(it)
+                },
+                modifier = Modifier.weight(1f),
+                label = { Text("Dashboard SSID", fontSize = 12.sp) },
+                singleLine = true,
+                colors = OutlinedTextFieldDefaults.colors(
+                    focusedBorderColor = AccentOrange,
+                    unfocusedBorderColor = TextDim,
+                    cursorColor = AccentOrange,
+                    focusedLabelColor = AccentOrange,
+                    unfocusedLabelColor = TextDim,
+                    focusedTextColor = TextPrimary,
+                    unfocusedTextColor = TextPrimary
+                ),
+                shape = RoundedCornerShape(10.dp)
+            )
+            
+            Spacer(modifier = Modifier.width(8.dp))
+            
+            IconButton(
+                onClick = { vm.startBleScan() },
+                enabled = !vm.isScanning,
+                modifier = Modifier
+                    .size(56.dp)
+                    .background(DashSurface, RoundedCornerShape(10.dp))
+                    .border(1.dp, TextDim.copy(alpha = 0.3f), RoundedCornerShape(10.dp))
+            ) {
+                if (vm.isScanning) {
+                    CircularProgressIndicator(modifier = Modifier.size(24.dp), color = AccentOrange, strokeWidth = 2.dp)
+                } else {
+                    Icon(
+                        imageVector = Icons.Default.Refresh,
+                        contentDescription = "Scan",
+                        tint = AccentOrange
+                    )
+                }
+            }
+        }
 
         Spacer(modifier = Modifier.height(10.dp))
 
@@ -444,6 +474,22 @@ fun SimulationCard(vm: MainViewModel) {
             ) {
                 Text("🧭 Nav", fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
             }
+        }
+        
+        Spacer(modifier = Modifier.height(10.dp))
+
+        Button(
+            onClick = { vm.toggleMapCasting() },
+            modifier = Modifier.fillMaxWidth(),
+            colors = ButtonDefaults.buttonColors(
+                containerColor = if (vm.isMapCasting) AccentRed else AccentBlue,
+                contentColor = Color.White
+            ),
+            shape = RoundedCornerShape(10.dp)
+        ) {
+            Icon(Icons.Default.LocationOn, contentDescription = null, modifier = Modifier.size(18.dp))
+            Spacer(modifier = Modifier.width(8.dp))
+            Text(if (vm.isMapCasting) "STOP MAP CAST" else "START MAP CAST", fontWeight = FontWeight.Bold)
         }
     }
 }

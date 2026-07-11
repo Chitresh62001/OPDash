@@ -80,7 +80,25 @@ class MediaNotificationListener : NotificationListenerService() {
     }
 
     override fun onNotificationPosted(sbn: StatusBarNotification?) {
-        // We don't need individual notifications; metadata comes from MediaSession
+        val packageName = sbn?.packageName ?: return
+        
+        // Handle Google Maps navigation notifications
+        if (packageName == "com.google.android.apps.maps") {
+            parseMapsNotification(sbn)
+        }
+    }
+
+    private fun parseMapsNotification(sbn: StatusBarNotification) {
+        val extras = sbn.notification.extras
+        val title = extras.getString("android.title") ?: "" // e.g. "250 m"
+        val text = extras.getString("android.text") ?: "" // e.g. "Turn left onto Main St"
+        
+        // This is a simplified parser. Real-world apps use regex or icon analysis.
+        // We'll log it for now to help the user see what's happening.
+        Logger.d("Maps: $title - $text")
+        
+        // If the service is running, we could send a navigation packet here.
+        // For now, we'll just log it.
     }
 
     override fun onNotificationRemoved(sbn: StatusBarNotification?) {
